@@ -56,6 +56,10 @@ class GLaDOS_Interactive_Eye(GLaDOS):
     def __init__(self):
         super(GLaDOS_Interactive_Eye, self).__init__()
         
+        self.just_said_something = False
+        self.time_since_speaking = 0
+        self.detection_threshold = 0.4
+        
         # initialzie GLaDOS's eye (rgb camera)
         self.eye = cv2.VideoCapture(0)
         
@@ -67,11 +71,9 @@ class GLaDOS_Interactive_Eye(GLaDOS):
             self.rval = False
             print('GLaDOS eye failed to initiate')
           
-        self.just_said_something = False
-        self.time_since_speaking = 0
     # main runnable
     def run(self):
-                
+        
         while self.rval:
             self.rval, frame1 = self.eye.read()
             time.sleep(0.02)
@@ -80,7 +82,7 @@ class GLaDOS_Interactive_Eye(GLaDOS):
             fdiff = frame1.astype('float32') - frame2.astype('float32')
             avg = fdiff.mean()
             
-            if avg >= 0.2:
+            if avg >= self.detection_threshold:
                 print('motion detected')
                 
                 # check when the last time GLaDOS spoke something
