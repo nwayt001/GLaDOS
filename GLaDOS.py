@@ -18,6 +18,8 @@ from os.path import isfile, join
 import numpy as np
 import cv2
 import matplotlib.pyplot as plt
+from PIL import Image
+import os
 
 class GLaDOS(object):
     def __init__(self):
@@ -53,7 +55,7 @@ class GLaDOS(object):
         self.speak(msg_file)
        
 class GLaDOS_Interactive_Eye(GLaDOS):
-    def __init__(self):
+    def __init__(self, detect_faces = False):
         super(GLaDOS_Interactive_Eye, self).__init__()
         
         self.just_said_something = False
@@ -71,6 +73,15 @@ class GLaDOS_Interactive_Eye(GLaDOS):
             self.rval = False
             print('GLaDOS eye failed to initiate')
           
+        # initialize a face detector for GLaDOS
+        self.faceDetector = FaceDetector()
+        self.detect_faces = detect_faces
+        self.face_detection_msgs = []
+        self.face_detection_msgs.append('D:\GLaDOS\\audio_library\\taunt_big_wave05.mp3')
+        self.face_detection_msgs.append('D:\GLaDOS\\audio_library\\taunt_small_wave01.mp3')
+        self.just_detected_face = False
+        self.time_since_face_detection = 0
+        
     # main runnable
     def run(self):
         
@@ -82,11 +93,26 @@ class GLaDOS_Interactive_Eye(GLaDOS):
             fdiff = frame1.astype('float32') - frame2.astype('float32')
             avg = fdiff.mean()
             
+            # detect any faces
+            if self.detect_faces:
+                faces = self.faceDetector.detectFaces(frame1)
+                if faces and not self.just_detected_face:
+                    print('detected a face')
+                    self.speak(self.face_detection_msgs[np.random.randint(0,2)])
+                    self.just_detected_face = True
+                    self.time_since_face_detection = time.time()
+                    self.just_said_something = True
+                    self.time_since_speaking = time.time()
+                    
+                if time.time() - self.time_since_face_detection > 10:
+                    self.just_detected_face = False
+                    
+            # detect any motion of any kind
             if avg >= self.detection_threshold:
                 print('motion detected')
                 
                 # check when the last time GLaDOS spoke something
-                if time.time() - self.time_since_speaking > 20:
+                if time.time() - self.time_since_speaking > 50:
                     self.just_said_something  = False
                 
                 # speak
@@ -101,10 +127,83 @@ class GLaDOS_Interactive_Eye(GLaDOS):
         # terminate on exit
         self.terminate()
         
+    
     def terminate(self):
         print('terminating...good bye.')
         self.eye.release()
         exit()
+        
+# Peripheral face detection class    
+class FaceDetector(object):
+    def __init__(self, run_vis = False):
+        
+        self.cascPath = "D:\opencv\\opencv\\build\\etc\\haarcascades\\"
+        
+        self.cascades =[]
+        self.cascades.append("haarcascade_frontalface_default.xml")
+        self.cascades.append("haarcascade_eye_tree_eyeglasses.xml")
+        self.cascades.append("haarcascade_profileface.xml")
+        
+        # Create the haar cascade
+        self.faceClassifier = []
+        for cascade in self.cascades:
+            self.faceClassifier.append(cv2.CascadeClassifier(os.path.join(self.cascPath, cascade)))
+        
+        if run_vis:
+            self.realTimeVis()
+        
+    def realTimeVis(self):
+        # get image of face
+        cv2.namedWindow("FaceDetector")
+        self.vc = cv2.VideoCapture(0)
+        rval, image = self.vc.read()
+
+        while rval:        
+            rval, image = self.vc.read()
+            img = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    
+            # detect faces and other features in the image
+            for classifier in self.faceClassifier:
+                objects = classifier.detectMultiScale(
+                    img,
+                    scaleFactor=1.1,
+                    minNeighbors=5,
+                    minSize=(30, 30),
+                    flags = cv2.CASCADE_SCALE_IMAGE
+                )
+                if len(objects) > 0:
+                    #print "Found {0} objects!".format(len(faces))
+                    # Draw a rectangle around the detected objects
+                    for (x, y, w, h) in objects:
+                        cv2.rectangle(image, (x, y), (x+w, y+h), (0, 255, 0), 2)
+           
+            cv2.imshow("FaceDetector", image)
+            key = cv2.waitKey(20)
+            if key == 27: # exit on ESC
+                break
+
+        self.vc.release()
+        cv2.destroyWindow("FaceDetector")        
+        
+    def detectFaces(self, img):
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        
+        detected_face = False
+        
+        # detect faces in the image
+        for classifier in self.faceClassifier:
+            faces = classifier.detectMultiScale(
+                img,
+                scaleFactor=1.1,
+                minNeighbors=5,
+                minSize=(30, 30),
+                flags = cv2.CASCADE_SCALE_IMAGE
+            )
+            if len(faces) > 0:
+                detected_face = True
+                
+        return detected_face
+        
         
 # Peripheral video capture Class
 class VideoCapture(object):
@@ -151,6 +250,4 @@ if __name__ == '__main__':
     self = GLaDOS_Interactive_Eye()
     self.run()
 
-
-
-
+    self = FaceDetector(run_vis = True)
