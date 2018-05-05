@@ -240,6 +240,22 @@ class LibraryDownloader(object):
                 print link['href']
             
 
+# Peripheral speech recognition v1
+class SpeechListener(object):
+    def __init__(self):
+        import string
+        import speech
+    def run(self):
+        while True:
+            print "Talk:"
+            phrase = speech.input()
+            #speech.say("You said %s" % phrase)
+            print "You said {0}".format(phrase)
+            #if phrase == "turn off":
+            if phrase.lower() == "goodbye":
+                break
+
+
 # Main entry point
 if __name__ == '__main__':
     # main GLaDOS
@@ -251,3 +267,5 @@ if __name__ == '__main__':
     self.run()
 
     self = FaceDetector(run_vis = True)
+
+
