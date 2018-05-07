@@ -21,6 +21,14 @@ import matplotlib.pyplot as plt
 from PIL import Image
 import os
 
+
+# global path variables
+# linux - robot
+global_path = '/home/oculus/GLaDOS/audio_library/'  
+# windows - alienware laptop
+#global_path = 'D:\GLaDOS\\audio_library\\'
+
+
 class GLaDOS(object):
     def __init__(self):
         # initialize audio mixer
@@ -33,8 +41,8 @@ class GLaDOS(object):
         self.speak(self.wakeupMsg)
         
     def load_audio_library(self):
-        self.wakeupMsg = 'D:\GLaDOS\\audio_library\chellgladoswakeup01.mp3'
-        self.library_dir = 'audio_library\\'
+        self.wakeupMsg = global_path + 'chellgladoswakeup01.mp3'
+        self.library_dir = global_path
         self.audiofiles  = [f for f in listdir(self.library_dir) if isfile(join(self.library_dir, f))]        
         
     def speak(self,msg):
@@ -77,8 +85,8 @@ class GLaDOS_Interactive_Eye(GLaDOS):
         self.faceDetector = FaceDetector()
         self.detect_faces = detect_faces
         self.face_detection_msgs = []
-        self.face_detection_msgs.append('D:\GLaDOS\\audio_library\\taunt_big_wave05.mp3')
-        self.face_detection_msgs.append('D:\GLaDOS\\audio_library\\taunt_small_wave01.mp3')
+        self.face_detection_msgs.append(global_path + 'taunt_big_wave05.mp3')
+        self.face_detection_msgs.append(global_path + 'taunt_small_wave01.mp3')
         self.just_detected_face = False
         self.time_since_face_detection = 0
         
@@ -259,13 +267,13 @@ class SpeechListener(object):
 # Main entry point
 if __name__ == '__main__':
     # main GLaDOS
-    #self = GLaDOS()
-    #self.run()
+    self = GLaDOS()
+    self.run()
     
     # interactive GLaDOS with eye
-    self = GLaDOS_Interactive_Eye()
-    self.run()
+    #self = GLaDOS_Interactive_Eye()
+    #self.run()
 
-    self = FaceDetector(run_vis = True)
+    #self = FaceDetector(run_vis = True)
 
 
