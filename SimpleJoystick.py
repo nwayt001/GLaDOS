@@ -180,8 +180,16 @@ class SimpleJoystick(object):
     # drive oculus prime robot (xaxxon) with wii remote
     def drive_robot(self):
         import oculusprimesocket as oc
+        
+        # connect to robot server
+        result = oc.connect()
+        
+        # initialize
+        for i in range(7):
+            evbuf = self.jsdev.read(8)
+            
         # Main event loop to poll for joystick state changes
-        while self.polling:
+        while result:
             evbuf = self.jsdev.read(8)
             if evbuf:
                 time, value, type, number = struct.unpack('IhBB', evbuf)
@@ -195,14 +203,21 @@ class SimpleJoystick(object):
                         if(button == 'b'):
                             oc.sendString('move stop')
                         if(button == 'minus'):
-                            oc.sendString('move left')
+                            oc.sendString('nudge left')
                         if(button == 'plus'):
-                            oc.sendString('move right')
+                            oc.sendString('nudge right')
                             
                         if(self.debug_mode):
                             if value:
                                 print("%s pressed" % (button))
-                                oc.speak('speech %s' % (button))
+                                if(button == 'a'):
+                                    oc.sendString('speech moving forward')
+                                if(button == 'b'):
+                                    oc.sendString('speech stopping')
+                                if(button == 'minus'):
+                                    oc.sendString('speech left')
+                                if(button == 'plus'):
+                                    oc.sendString('speech right')
                             else:
                                 print("%s released" % (button))
                                 
@@ -213,7 +228,7 @@ if __name__ == '__main__':
     js.debug_mode = True
     
     # Start polling the joystick
-    js.poll()
+    #js.poll()
     
     # manually control robot
     js.drive_robot()
