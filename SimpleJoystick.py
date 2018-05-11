@@ -176,8 +176,9 @@ class SimpleJoystick(object):
 #                                print("%s: %.3f" % (axis, fvalue))
                             if(axis=='x'):
                                 print(fvalue)
-
-    def control_robot(self):
+    
+    # drive oculus prime robot (xaxxon) with wii remote
+    def drive_robot(self):
         import oculusprimesocket as oc
         # Main event loop to poll for joystick state changes
         while self.polling:
@@ -215,7 +216,7 @@ if __name__ == '__main__':
     js.poll()
     
     # manually control robot
-    js.control_robot()
+    js.drive_robot()
 
 
         
