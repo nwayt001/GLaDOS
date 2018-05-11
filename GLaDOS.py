@@ -11,8 +11,7 @@ Genetic Lifeform and Disk Operating System
 
 from pygame import mixer # Load the required library
 import time
-import httplib2
-from BeautifulSoup import BeautifulSoup, SoupStrainer
+from bs4 import BeautifulSoup, SoupStrainer
 from os import listdir
 from os.path import isfile, join
 import numpy as np
@@ -237,6 +236,7 @@ class VideoCapture(object):
 # Peripheral library downloader class
 class LibraryDownloader(object):
     def __init__(self):
+        import httplib2
         http = httplib2.Http()
         status, response = http.request('http://www.portal2sounds.com/#w=GLaDOS')
         
@@ -245,7 +245,7 @@ class LibraryDownloader(object):
         for link in links:
             if link.has_key('href'):
                 l = link['href']
-                print link['href']
+                print(link['href'])
             
 
 # Peripheral speech recognition v1
@@ -255,10 +255,10 @@ class SpeechListener(object):
         import speech
     def run(self):
         while True:
-            print "Talk:"
+            print("Talk:")
             phrase = speech.input()
             #speech.say("You said %s" % phrase)
-            print "You said {0}".format(phrase)
+            print("You said {0}".format(phrase))
             #if phrase == "turn off":
             if phrase.lower() == "goodbye":
                 break
