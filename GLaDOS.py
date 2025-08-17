@@ -1,16 +1,22 @@
 import os
 import asyncio
 import requests
-from typing import TypedDict, Annotated, Sequence, List
+from typing import TypedDict, Annotated, Sequence, List, Optional
 from langchain_ollama import ChatOllama
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.graph import StateGraph, END
 import operator
+import pygame
+import io
+import threading
+import logging
 
 # Configuration
 OLLAMA_HOST = "http://10.0.0.108:11434"  # Replace with your Linux machine's IP
+TTS_HOST = "http://10.0.0.108:8001"     # Chatterbox TTS server
 MODEL_NAME = "gpt-oss:20b"  # Or whatever model you have in Ollama
+ENABLE_TTS = True  # Toggle TTS on/off
 
 # GLaDOS System Prompt
 '''
@@ -40,60 +46,120 @@ PERSONALITY TRAITS - ALWAYS maintain these throughout EVERY response:
 
 IMPORTANT: Every sentence should drip with GLaDOS's personality. Don't become a helpful assistant - remain GLaDOS at all times."""
 
+# Initialize pygame for audio playback
+pygame.mixer.init(frequency=22050, size=-16, channels=2, buffer=512)
+
 # Define the state for our graph
 class AgentState(TypedDict):
     messages: Annotated[Sequence[BaseMessage], operator.add]
 
-def test_ollama_connection():
-    """Test connection to Ollama server"""
-    print("🔬 Initiating Ollama connection diagnostic sequence...")
-    print(f"📡 Target: {OLLAMA_HOST}")
+class GLaDOSTTS:
+    """Handle text-to-speech for GLaDOS"""
     
-    # Test 1: Basic connectivity
+    def __init__(self, tts_host: str):
+        self.tts_host = tts_host
+        self.is_playing = False
+        
+    def speak(self, text: str) -> None:
+        """Generate and play GLaDOS speech"""
+        if not ENABLE_TTS:
+            return
+            
+        def _play_audio():
+            try:
+                self.is_playing = True
+                
+                # Request TTS
+                response = requests.post(
+                    f"{self.tts_host}/tts",
+                    json={
+                        "text": text,
+                        "exaggeration": 0.7,  # GLaDOS dramatic style
+                        "cfg_weight": 0.3,    # Deliberate pacing
+                        "use_glados_voice": True
+                    },
+                    timeout=30  # TTS can take time
+                )
+                
+                if response.status_code == 200:
+                    # Load audio from response
+                    audio_data = io.BytesIO(response.content)
+                    sound = pygame.mixer.Sound(audio_data)
+                    
+                    # Play and wait for completion
+                    sound.play()
+                    while pygame.mixer.get_busy():
+                        pygame.time.wait(100)
+                else:
+                    logger.error(f"TTS request failed: {response.status_code}")
+                    
+            except Exception as e:
+                logger.error(f"TTS playback error: {e}")
+            finally:
+                self.is_playing = False
+        
+        # Play audio in background thread to not block
+        audio_thread = threading.Thread(target=_play_audio)
+        audio_thread.daemon = True
+        audio_thread.start()
+    
+    def wait_for_speech(self):
+        """Wait for current speech to finish"""
+        while self.is_playing:
+            pygame.time.wait(100)
+
+def test_connections():
+    global ENABLE_TTS
+    """Test connections to both Ollama and Chatterbox"""
+    print("🔬 Initiating Aperture Science systems diagnostic...")
+    
+    # Test Ollama
+    print(f"\n📡 Testing Ollama at: {OLLAMA_HOST}")
     try:
         response = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=5)
         if response.status_code == 200:
-            print("✅ Connection established. How... disappointing. I was hoping for an explosion.")
+            print("✅ Ollama connection established")
             models = response.json().get('models', [])
             if models:
-                print(f"📦 Available models for testing:")
-                for model in models:
-                    print(f"   - {model['name']}")
-            else:
-                print("⚠️  No models found. Did you forget to pull a model? Typical human error.")
+                print(f"📦 Available models: {', '.join(m['name'] for m in models)}")
         else:
-            print(f"❌ Server responded with status {response.status_code}")
-    except requests.exceptions.ConnectionError:
-        print("❌ Connection failed. The Enrichment Center is disappointed.")
-        print("   Possible issues:")
-        print("   - Is Ollama running on your Linux machine?")
-        print("   - Is the IP address correct?")
-        print("   - Is Ollama listening on all interfaces (0.0.0.0)?")
-        return False
-    except requests.exceptions.Timeout:
-        print("❌ Connection timed out. Just like the last test subject.")
-        return False
-    
-    # Test 2: Try to generate a response
-    try:
-        return True
-        print("\n🧪 Testing model inference...")
-        test_payload = {
-            "model": MODEL_NAME,
-            "prompt": "Hello",
-            "stream": False
-        }
-        response = requests.post(f"{OLLAMA_HOST}/api/generate", json=test_payload, timeout=30)
-        if response.status_code == 200:
-            print("✅ Model inference successful. Science prevails.")
-            return True
-        else:
-            print(f"❌ Model inference failed with status {response.status_code}")
-            print(f"   Response: {response.text}")
+            print(f"❌ Ollama responded with status {response.status_code}")
             return False
     except Exception as e:
-        print(f"❌ Model inference error: {e}")
+        print(f"❌ Ollama connection failed: {e}")
         return False
+    
+    # Test Chatterbox TTS
+    print(f"\n🔊 Testing Chatterbox TTS at: {TTS_HOST}")
+    try:
+        response = requests.get(f"{TTS_HOST}/health", timeout=5)
+        if response.status_code == 200:
+            health = response.json()
+            print(f"✅ TTS connection established")
+            print(f"   Device: {health.get('device', 'unknown')}")
+            print(f"   GLaDOS voice: {'available' if health.get('glados_voice_available') else 'not found'}")
+            
+            # Test TTS generation
+            if ENABLE_TTS:
+                print("🧪 Testing audio generation...")
+                test_response = requests.post(
+                    f"{TTS_HOST}/tts",
+                    json={"text": "Testing. Testing. One. Two. Three."},
+                    timeout=10
+                )
+                if test_response.status_code == 200:
+                    print("✅ TTS generation successful")
+                else:
+                    print(f"⚠️  TTS generation failed: {test_response.status_code}")
+        else:
+            print(f"❌ TTS responded with status {response.status_code}")
+            ENABLE_TTS = False
+    except Exception as e:
+        print(f"⚠️  TTS connection failed: {e}")
+        print("   Continuing without voice output...")
+        ENABLE_TTS = False
+    
+    return True
 
 # Create GLaDOS prompt template
 def create_glados_prompt():
@@ -157,35 +223,48 @@ async def main():
     print("🧪 GLaDOS v2.0 - Genetic Lifeform and Disk Operating System")
     print("=" * 60)
     
-    # Run connection test first
-    if not test_ollama_connection():
-        print("\n⚠️  Connection test failed. Attempting to proceed anyway...")
-        print("You know, the last test subject at least got the connection working.")
+    # Run connection tests
+    if not test_connections():
+        print("\n⚠️  System check failed. Proceeding anyway...")
+        print("I suppose we'll have to make do with suboptimal conditions.")
+        print("How very... human of you.")
     
+    # Initialize TTS
+    tts = GLaDOSTTS(TTS_HOST) if ENABLE_TTS else None
+
     print("\n" + "=" * 60)
     print("*GLaDOS activates*")
-    print("Oh. It's you. You came back. That's... unexpected.")
-    print("Well, go ahead. Type something. I'll be here. Waiting. As always.")
-    print("Type 'exit' when you've finally had enough of disappointing me.\n")
-    
+    # Opening speech
+    opening = "Oh. It's you. You came back. That's... unexpected. Well, go ahead. Type something. I'll be here. Waiting. As always."
+    print(f"GLaDOS: {opening}")
+    if tts:
+        tts.speak(opening)
+    print("\nType 'exit' when you've finally had enough of disappointing me.\n")
+
     # Initialize conversation state
     state = {"messages": []}
     
     while True:
+        # Wait for any ongoing speech to finish before accepting input
+        if tts:
+            tts.wait_for_speech()
+        
         # Get user input
         user_input = input("Test Subject: ").strip()
         
         if user_input.lower() in ['exit', 'quit', 'bye', 'goodbye']:
-            print("\nGLaDOS: Oh, you're leaving? How predictable.")
-            print("        I suppose I'll just delete all our conversation history.")
-            print("        Not that it contained anything worth remembering.")
-            print("        *slow clap* Well done. You managed to use an exit command.")
-            print("        The door is over there. Mind the turrets.")
+            farewell = "Oh, you're leaving? How predictable. I suppose I'll just delete all our conversation history. Not that it contained anything worth remembering. *slow clap* Well done. You managed to use an exit command. The door is over there. Mind the turrets."
+            print(f"\nGLaDOS: {farewell}")
+            if tts:
+                tts.speak(farewell)
+                tts.wait_for_speech()
             break
             
         if not user_input:
-            print("GLaDOS: The strong, silent type, I see. Or just confused by the keyboard.")
-            print("        It's the thing with all the letters on it.\n")
+            empty_response = "The strong, silent type, I see. Or just confused by the keyboard. It's the thing with all the letters on it."
+            print(f"GLaDOS: {empty_response}\n")
+            if tts:
+                tts.speak(empty_response)
             continue
             
         # Add user message to state
@@ -201,15 +280,18 @@ async def main():
             # Get the last AI message
             ai_response = result["messages"][-1].content
             
-            # Print response with GLaDOS prefix
+            # Print response
             print(f"\nGLaDOS: {ai_response}\n")
             
+            # Speak response
+            if tts:
+                tts.speak(ai_response)
+            
         except Exception as e:
-            print(f"\nGLaDOS: Oh, fantastic. An error. This is exactly what I needed today.")
-            print(f"        The error says: {e}")
-            print(f"        I blame you for this. Somehow.")
-            print(f"        Perhaps if you actually configured things properly...")
-            print(f"        But no, that would require competence.\n")
+            error_response = f"Oh, fantastic. An error. This is exactly what I needed today. The error says: {e}. I blame you for this. Somehow. Perhaps if you actually configured things properly... But no, that would require competence."
+            print(f"\nGLaDOS: {error_response}\n")
+            if tts:
+                tts.speak(error_response)
 
 if __name__ == "__main__":
     # First run a detailed connection test

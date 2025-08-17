@@ -6,3 +6,4 @@ langchain-ollama
 chatterbox-tts 
 fastapi
 uvicorn
+pygame
