@@ -23,11 +23,11 @@ app = FastAPI(title="GLaDOS TTS Server")
 
 # Global model variable
 model = None
-GLADOS_VOICE_PATH = "glados_voice_sample.wav"  # Update this path
+GLADOS_VOICE_PATH = "jarvis_sample.wav"  # Update this path
 
 class TTSRequest(BaseModel):
     text: str
-    exaggeration: float = 0.7  # GLaDOS dramatic style
+    exaggeration: float = 0.1  # GLaDOS dramatic style
     cfg_weight: float = 0.3    # Deliberate pacing
     use_glados_voice: bool = True
 
