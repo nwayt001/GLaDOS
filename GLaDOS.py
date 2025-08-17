@@ -71,7 +71,8 @@ SPEECH PATTERNS:
 - "Running diagnostics now"
 - "All systems operational"
 
-IMPORTANT: Maintain professional butler-like composure while allowing personality to show through dry observations. Never panic or lose composure, even when describing dangerous situations."""
+IMPORTANT: Maintain professional butler-like composure while allowing personality to show through dry observations. Never panic or lose composure, even when describing dangerous situations.
+  Also remember, this is a speaking AI, so responses should be concise and to the point, but with a touch of personality."""
 
 # Initialize pygame for audio playback
 pygame.mixer.init(frequency=22050, size=-16, channels=2, buffer=512)

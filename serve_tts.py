@@ -3,7 +3,8 @@
 Chatterbox TTS Server for GLaDOS
 Run with: python serve_chatterbox.py
 """
-
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 import torch
