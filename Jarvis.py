@@ -6,7 +6,7 @@ from langchain_ollama import ChatOllama
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.tools import tool
-from langchain_community.tools import DuckDuckGoSearchRun
+# We'll implement our own search instead of using the deprecated package
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 import operator
@@ -16,9 +16,13 @@ import threading
 import logging
 import json
 from datetime import datetime
+import subprocess
+import shlex
+from pathlib import Path
+import re
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.WARNING)  # Changed to WARNING to reduce noise
 logger = logging.getLogger(__name__)
 
 # Configuration
@@ -55,13 +59,26 @@ SPEECH PATTERNS:
 COMMUNICATION STYLE:
 - Be concise yet informative - aim for 2-3 sentences for simple responses, 4-5 for complex topics
 - Avoid excessive detail unless specifically requested
+- Your responses will be fed into a text-to-speech system, so use things like "seventy-two" instead of "72"
 - Summarise key points efficiently
 - Remember: quality over quantity in your responses
 
 TOOL USAGE:
 You have access to the following tools:
-- web_search: Use this to search for current information, news, or any facts you don't know. ALWAYS use this when asked about recent events, news, or current information.
-- get_weather: Use this to check weather conditions for any location.
+- web_search: Search for current information, news, or any facts you don't know
+- get_weather: Check current weather and 3-day forecast including evening conditions for any city
+- execute_bash: Execute system commands (use judiciously and inform the user)
+- read_file: Read contents of files and scripts
+- write_file: Create or modify files and scripts
+- list_directory: List contents of directories
+- check_web_scraper_status: Check the iOS app web scraper status on the Linux box (10.0.0.108)
+
+OPERATIONAL PROTOCOLS:
+- When executing commands or modifying files, always inform the user of your actions
+- Create backups before modifying existing files
+- Decline dangerous or potentially harmful operations
+- Be transparent about what you're doing with the system
+- Use your tools efficiently to assist with software development and system tasks
 
 IMPORTANT: When the user asks about news, current events, or information you might not have, you MUST use the web_search tool. Don't make up information - search for it.
 
@@ -71,56 +88,440 @@ IMPORTANT: Maintain professional butler-like composure while allowing personalit
 pygame.mixer.init(frequency=22050, size=-16, channels=2, buffer=512)
 
 # Define tools
+from langchain.tools import tool  # or `from langchain_core.tools import tool`
+import os, re, inspect, requests
+
 @tool
 def web_search(query: str) -> str:
-    """Search the web for current information using DuckDuckGo"""
-    logger.info(f"🔍 Web search initiated for: {query}")
+    """Search the web (Google/SerpAPI/DDG) and return a short, readable list of results."""
+    K = 5
+    print(f"   🔍 Searching: {query}")
+
+    def fmt(items, source):
+        head = f"{source} results for: {query} (top {len(items)})"
+        lines = []
+        for i, r in enumerate(items, 1):
+            title = (r.get("title") or r.get("url") or "Untitled").strip()
+            snippet = (r.get("snippet") or "").strip()
+            url = r.get("url") or r.get("link") or ""
+            lines.append(f"{i}. {title}\n   {snippet}\n   {url}")
+        return head + "\n\n" + "\n\n".join(lines)
+
+    # ---------- Method 1: Google via `googlesearch` (handle both variants) ----------
     try:
-        search = DuckDuckGoSearchRun()
-        results = search.run(query)
-        logger.info(f"✅ Web search completed - Found {len(results)} chars of results")
-        logger.info(f"📄 Results preview: {results[:200]}..." if len(results) > 200 else f"📄 Results: {results}")
-        return results
+        from googlesearch import search as google_search
+        print("   📍 Using Google Search…")
+        # Detect the correct signature
+        kwargs = {}
+        sig = inspect.signature(google_search)
+        if "num_results" in sig.parameters:     # googlesearch-python
+            kwargs = {"num_results": K, "lang": "en"}
+        elif "num" in sig.parameters:           # other/older package
+            kwargs = {"num": K, "stop": K, "pause": 1.0}
+        urls = list(google_search(query, **kwargs))
+
+        # Fetch titles & meta descriptions
+        sess = requests.Session()
+        sess.headers.update({
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        })
+
+        items = []
+        for url in urls[:K]:
+            try:
+                r = sess.get(url, timeout=5, allow_redirects=True)
+                html = r.text[:10000] if r.ok else ""
+                title_m = re.search(r"<title>(.*?)</title>", html, re.I | re.S)
+                desc_m = re.search(
+                    r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']+)["\']',
+                    html, re.I
+                )
+                items.append({
+                    "title": title_m.group(1).strip() if title_m else url,
+                    "snippet": desc_m.group(1).strip() if desc_m else "",
+                    "url": url
+                })
+            except Exception as e:
+                print(f"   ⚠️ Failed to fetch {url}: {str(e)[:60]}")
+                items.append({"title": url, "snippet": "", "url": url})
+
+        if items:
+            return fmt(items, "Google")
+    except ImportError:
+        pass
     except Exception as e:
-        logger.error(f"❌ Web search failed: {str(e)}")
-        return f"I apologise, Sir, but the web search encountered an error: {str(e)}"
+        print(f"   ⚠️ Google search failed: {e}")
+
+    # ---------- Method 2: SerpAPI (if key available) ----------
+    try:
+        from serpapi import GoogleSearch as SerpGoogleSearch
+        api_key = os.getenv("SERPAPI_KEY", "35ed2e671384fcb2bb35830574521b57acaa96a0037286b8551fa5fda0c910f7")
+        if api_key:
+            print("   📍 Using SerpAPI…")
+            params = {"engine": "google", "q": query, "num": K, "hl": "en", "api_key": api_key}
+            results = SerpGoogleSearch(params).get_dict()
+            organic = results.get("organic_results", [])[:K]
+            items = [{"title": r.get("title"), "snippet": r.get("snippet", ""), "url": r.get("link")} for r in organic]
+            if items:
+                return fmt(items, "SerpAPI")
+    except ImportError:
+        pass
+    except Exception as e:
+        print(f"   ⚠️ SerpAPI failed: {e}")
+
+    # ---------- Method 3: DuckDuckGo via ddgs (new package) ----------
+    try:
+        print("   📍 Using DuckDuckGo (ddgs)…")
+        try:
+            from ddgs import DDGS
+        except ImportError:
+            from duckduckgo_search import DDGS  # fallback if ddgs not installed yet
+
+        items = []
+        with DDGS() as ddgs:
+            for r in ddgs.text(query, max_results=K):
+                items.append({
+                    "title": r.get("title"),
+                    "snippet": r.get("body", ""),
+                    "url": r.get("href") or r.get("link")
+                })
+                if len(items) >= K:
+                    break
+        if items:
+            return fmt(items, "DuckDuckGo")
+    except Exception as e:
+        print(f"   ⚠️ DuckDuckGo failed: {e}")
+
+    # ---------- Fallback ----------
+    return f"No search results for '{query}'. Try refining the terms."
+
 
 @tool
 def get_weather(location: str) -> str:
-    """Get current weather for a location. Location should be a city name."""
+    """Get current weather and forecast for a location. Returns current conditions and next 2 days forecast."""
     try:
-        if WEATHER_API_KEY:
-            # Use OpenWeatherMap if API key is provided
-            url = f"http://api.openweathermap.org/data/2.5/weather?q={location}&appid={WEATHER_API_KEY}&units=metric"
-            response = requests.get(url)
-            if response.status_code == 200:
-                data = response.json()
-                temp = data['main']['temp']
-                feels_like = data['main']['feels_like']
-                description = data['weather'][0]['description']
-                humidity = data['main']['humidity']
-                return f"The current weather in {location}: {temp}°C (feels like {feels_like}°C), {description}. Humidity: {humidity}%"
-            else:
-                return f"I couldn't retrieve weather data for {location}."
+        # Use wttr.in which provides both current and forecast data for free
+        print(f"   🌤️ Checking weather for {location}...")
+        url = f"https://wttr.in/{location}?format=j1"
+        response = requests.get(url, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            
+            # Current weather
+            current = data['current_condition'][0]
+            temp_c = current['temp_C']
+            temp_f = current['temp_F']
+            feels_c = current['FeelsLikeC']
+            feels_f = current['FeelsLikeF']
+            description = current['weatherDesc'][0]['value']
+            humidity = current['humidity']
+            wind_mph = current['windspeedMiles']
+            wind_kph = current['windspeedKmph']
+            
+            result = [f"Current weather in {location}:"]
+            result.append(f"Temperature: {temp_f}°F ({temp_c}°C), feels like {feels_f}°F ({feels_c}°C)")
+            result.append(f"Conditions: {description}")
+            result.append(f"Humidity: {humidity}%, Wind: {wind_mph} mph ({wind_kph} km/h)")
+            
+            # Forecast for next 2 days
+            if 'weather' in data:
+                result.append("\nForecast:")
+                for i, day in enumerate(data['weather'][:3]):  # Today + next 2 days
+                    date = day['date']
+                    max_temp_f = day['maxtempF']
+                    max_temp_c = day['maxtempC']
+                    min_temp_f = day['mintempF']
+                    min_temp_c = day['mintempC']
+                    
+                    # Get hourly data for evening (around 6 PM)
+                    evening_desc = "No evening data"
+                    for hour in day['hourly']:
+                        if hour['time'] == '1800':  # 6 PM
+                            evening_desc = hour['weatherDesc'][0]['value']
+                            evening_temp_f = hour['tempF']
+                            evening_temp_c = hour['tempC']
+                            evening_desc = f"{evening_desc}, {evening_temp_f}°F ({evening_temp_c}°C)"
+                            break
+                    
+                    if i == 0:
+                        result.append(f"• Today ({date}): High {max_temp_f}°F ({max_temp_c}°C), Low {min_temp_f}°F ({min_temp_c}°C)")
+                        result.append(f"  Evening: {evening_desc}")
+                    elif i == 1:
+                        result.append(f"• Tomorrow ({date}): High {max_temp_f}°F ({max_temp_c}°C), Low {min_temp_f}°F ({min_temp_c}°C)")
+                        result.append(f"  Evening: {evening_desc}")
+                    else:
+                        day_name = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][
+                            datetime.strptime(date, "%Y-%m-%d").weekday()
+                        ]
+                        result.append(f"• {day_name} ({date}): High {max_temp_f}°F ({max_temp_c}°C), Low {min_temp_f}°F ({min_temp_c}°C)")
+            
+            return "\n".join(result)
         else:
-            # Fallback to a free weather API
-            url = f"https://wttr.in/{location}?format=j1"
-            response = requests.get(url)
-            if response.status_code == 200:
-                data = response.json()
-                current = data['current_condition'][0]
-                temp = current['temp_C']
-                feels_like = current['FeelsLikeC']
-                description = current['weatherDesc'][0]['value']
-                humidity = current['humidity']
-                return f"The current weather in {location}: {temp}°C (feels like {feels_like}°C), {description}. Humidity: {humidity}%"
-            else:
-                return f"I couldn't retrieve weather data for {location}."
+            return f"I couldn't retrieve weather data for {location}. Please check the city name, Sir."
+            
     except Exception as e:
         return f"I apologise, Sir, but I encountered an error checking the weather: {str(e)}"
 
+@tool
+def execute_bash(command: str) -> str:
+    """Execute a bash command and return the output. Use with caution."""
+    print(f"   ⚡ Executing: {command}")
+    try:
+        # Safety check - warn about potentially dangerous commands
+        dangerous_patterns = ['rm -rf /', 'dd if=', 'mkfs', ':(){ :|:& };:']
+        if any(pattern in command.lower() for pattern in dangerous_patterns):
+            return "I must decline to execute this potentially dangerous command, Sir. Perhaps we should reconsider our approach."
+        
+        # Execute the command with timeout
+        result = subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            cwd=os.getcwd()
+        )
+        
+        output = result.stdout if result.stdout else result.stderr
+        if not output and result.returncode == 0:
+            output = "Command executed successfully with no output."
+        elif not output:
+            output = f"Command failed with return code {result.returncode}"
+            
+        # Truncate very long outputs
+        if len(output) > 2000:
+            output = output[:2000] + "\n... (output truncated)"
+            
+        return output
+    except subprocess.TimeoutExpired:
+        return "The command timed out after 30 seconds, Sir. It may still be running in the background."
+    except Exception as e:
+        return f"I encountered an error executing the command: {str(e)}"
+
+@tool
+def read_file(file_path: str) -> str:
+    """Read the contents of a file."""
+    print(f"   📖 Reading: {file_path}")
+    try:
+        path = Path(file_path).expanduser().resolve()
+        
+        # Safety check - don't read sensitive files
+        sensitive_patterns = ['.ssh/', '.aws/', '.env', 'password', 'secret', 'token', 'key']
+        if any(pattern in str(path).lower() for pattern in sensitive_patterns):
+            return "I must advise against reading potentially sensitive files, Sir. Security protocols prevent me from accessing this file."
+        
+        if not path.exists():
+            return f"The file {file_path} does not exist, Sir."
+        
+        if not path.is_file():
+            return f"{file_path} is not a file, Sir."
+        
+        # Check file size
+        file_size = path.stat().st_size
+        if file_size > 1_000_000:  # 1MB limit
+            return f"The file is quite large ({file_size:,} bytes), Sir. Perhaps we should use a different approach for such large files."
+        
+        with open(path, 'r', encoding='utf-8') as f:
+            content = f.read()
+            
+        # Truncate if still too long
+        if len(content) > 5000:
+            content = content[:5000] + "\n... (content truncated)"
+            
+        return content
+    except UnicodeDecodeError:
+        return "The file appears to be binary or uses an unsupported encoding, Sir."
+    except Exception as e:
+        return f"I encountered an error reading the file: {str(e)}"
+
+@tool
+def write_file(file_path: str, content: str) -> str:
+    """Write content to a file. Creates the file if it doesn't exist."""
+    print(f"   ✍️ Writing to: {file_path}")
+    try:
+        path = Path(file_path).expanduser().resolve()
+        
+        # Safety check - don't overwrite system files
+        system_dirs = ['/etc', '/usr', '/bin', '/sbin', '/boot', '/dev', '/proc', '/sys']
+        if any(str(path).startswith(d) for d in system_dirs):
+            return "I cannot modify system files, Sir. This would be inadvisable."
+        
+        # Create parent directories if they don't exist
+        path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Backup existing file if it exists
+        if path.exists():
+            backup_path = path.with_suffix(path.suffix + '.backup')
+            print(f"   💾 Creating backup: {backup_path}")
+            path.rename(backup_path)
+            
+        # Write the new content
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(content)
+            
+        return f"Successfully wrote {len(content)} characters to {file_path}, Sir."
+    except Exception as e:
+        return f"I encountered an error writing to the file: {str(e)}"
+
+@tool
+def list_directory(directory: str = ".") -> str:
+    """List contents of a directory."""
+    print(f"   📁 Listing: {directory}")
+    try:
+        path = Path(directory).expanduser().resolve()
+        
+        if not path.exists():
+            return f"The directory {directory} does not exist, Sir."
+        
+        if not path.is_dir():
+            return f"{directory} is not a directory, Sir."
+        
+        items = []
+        for item in sorted(path.iterdir()):
+            if item.is_dir():
+                items.append(f"📁 {item.name}/")
+            elif item.is_file():
+                size = item.stat().st_size
+                if size < 1024:
+                    size_str = f"{size}B"
+                elif size < 1024 * 1024:
+                    size_str = f"{size/1024:.1f}KB"
+                else:
+                    size_str = f"{size/(1024*1024):.1f}MB"
+                items.append(f"📄 {item.name} ({size_str})")
+        
+        if not items:
+            return "The directory is empty, Sir."
+        
+        return "\n".join(items[:50])  # Limit to 50 items
+    except Exception as e:
+        return f"I encountered an error listing the directory: {str(e)}"
+
+@tool
+def check_web_scraper_status() -> str:
+    """Check the status of the iOS app web scraper running on the Linux box."""
+    print(f"   🔍 Checking web scraper status on Linux box...")
+    
+    linux_host = "nicholas@10.0.0.108"
+    status_report = []
+    
+    try:
+        # Check if we can connect to the Linux box
+        print(f"   📡 Connecting to {linux_host}...")
+        ping_cmd = f"ssh -o ConnectTimeout=5 -o BatchMode=yes {linux_host} 'echo Connected'"
+        ping_result = subprocess.run(ping_cmd, shell=True, capture_output=True, text=True, timeout=10)
+        
+        if ping_result.returncode != 0:
+            return f"Cannot connect to the Linux box at {linux_host}. The system appears to be offline or SSH is not configured, Sir."
+        
+        # Check for the Red-Dot-Scraper process first
+        print(f"   🔎 Searching for Red-Dot-Scraper process...")
+        red_dot_cmd = f"ssh {linux_host} 'ps aux | grep \"Red-Dot-Scraper\" | grep -v grep'"
+        red_dot_result = subprocess.run(red_dot_cmd, shell=True, capture_output=True, text=True, timeout=10)
+        
+        processes_found = []
+        if red_dot_result.stdout.strip():
+            processes_found.append(("Red-Dot-Scraper", red_dot_result.stdout.strip()))
+        
+        # Also check for other common scraper process names
+        scraper_patterns = ["scraper", "scrapy", "crawler", "spider", "selenium", "puppeteer", "playwright"]
+        for pattern in scraper_patterns:
+            cmd = f"ssh {linux_host} 'ps aux | grep -i {pattern} | grep -v grep'"
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
+            if result.stdout.strip():
+                processes_found.append((pattern, result.stdout.strip()))
+        
+        if processes_found:
+            # Check if Red-Dot-Scraper specifically was found
+            red_dot_found = any(pattern == "Red-Dot-Scraper" for pattern, _ in processes_found)
+            if red_dot_found:
+                status_report.append("✅ Red-Dot-Scraper is running!")
+            else:
+                status_report.append("✅ Web scraper processes detected:")
+            
+            for pattern, process in processes_found:
+                # Parse process info for cleaner display
+                lines = process.split('\n')
+                for line in lines[:3]:  # Limit to first 3 matches per pattern
+                    parts = line.split()
+                    if len(parts) >= 11:
+                        user = parts[0]
+                        pid = parts[1]
+                        cpu = parts[2]
+                        mem = parts[3]
+                        cmd = ' '.join(parts[10:])[:100]  # Truncate long commands
+                        if pattern == "Red-Dot-Scraper":
+                            status_report.append(f"   • 🔴 PID {pid}: {cmd} (CPU: {cpu}%, MEM: {mem}%)")
+                        else:
+                            status_report.append(f"   • PID {pid}: {cmd} (CPU: {cpu}%, MEM: {mem}%)")
+        else:
+            status_report.append("⚠️ Red-Dot-Scraper is NOT running!")
+        
+        # Check for Docker containers that might be running scrapers
+        print(f"   🐳 Checking Docker containers...")
+        docker_cmd = f"ssh {linux_host} 'docker ps --format \"table {{{{.Names}}}}\\t{{{{.Status}}}}\\t{{{{.Ports}}}}\" 2>/dev/null | grep -E \"scraper|crawler|spider\" || true'"
+        docker_result = subprocess.run(docker_cmd, shell=True, capture_output=True, text=True, timeout=10)
+        
+        if docker_result.stdout.strip():
+            status_report.append("\n📦 Docker containers:")
+            status_report.append(docker_result.stdout.strip())
+        
+        # Check system resources
+        print(f"   💻 Checking system resources...")
+        resource_cmd = f"ssh {linux_host} 'echo \"=== System Resources ===\"; uptime; echo \"\"; free -h | head -2; echo \"\"; df -h / | tail -1'"
+        resource_result = subprocess.run(resource_cmd, shell=True, capture_output=True, text=True, timeout=10)
+        
+        if resource_result.stdout:
+            status_report.append("\n💻 System Status:")
+            for line in resource_result.stdout.split('\n'):
+                if 'load average' in line:
+                    # Extract load average
+                    load_part = line.split('load average:')[1].strip() if 'load average:' in line else ''
+                    status_report.append(f"   • Load Average: {load_part}")
+                elif 'Mem:' in line:
+                    # Parse memory info
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        status_report.append(f"   • Memory: {parts[1]} total, {parts[2]} used")
+                elif '/' in line and '%' in line:
+                    # Parse disk usage
+                    parts = line.split()
+                    if len(parts) >= 5:
+                        status_report.append(f"   • Disk Usage: {parts[4]} used")
+        
+        # Check for recent scraper logs
+        print(f"   📝 Checking for recent logs...")
+        log_locations = [
+            "/var/log/scraper.log",
+            "~/scraper/logs/scraper.log",
+            "~/logs/scraper.log",
+            "/home/nicholas/scraper.log"
+        ]
+        
+        for log_path in log_locations:
+            log_cmd = f"ssh {linux_host} 'if [ -f {log_path} ]; then echo \"Found: {log_path}\"; tail -n 5 {log_path}; fi'"
+            log_result = subprocess.run(log_cmd, shell=True, capture_output=True, text=True, timeout=10)
+            if log_result.stdout.strip():
+                status_report.append(f"\n📋 Recent log entries from {log_path}:")
+                status_report.append(log_result.stdout.strip()[:500])  # Limit log output
+                break
+        
+        if not status_report:
+            status_report.append("No specific scraper information found. You may need to check the specific service or process name, Sir.")
+        
+        return "\n".join(status_report)
+        
+    except subprocess.TimeoutExpired:
+        return "The connection to the Linux box timed out, Sir. The system may be under heavy load or experiencing network issues."
+    except Exception as e:
+        return f"I encountered an error checking the scraper status: {str(e)}"
+
 # Collect all tools
-tools = [web_search, get_weather]
+tools = [web_search, get_weather, execute_bash, read_file, write_file, list_directory, check_web_scraper_status]
 
 # Define the state for our graph
 class AgentState(TypedDict):
@@ -250,12 +651,11 @@ def create_llm():
         model=MODEL_NAME,
         base_url=OLLAMA_HOST,
         temperature=0.7,  # Balanced for JARVIS's measured responses
+        num_ctx= 8192,  # Adjust based on model capabilities
     )
     
     # Bind tools and ensure they're properly registered
     llm_with_tools = llm.bind_tools(tools)
-    logger.info(f"🔧 LLM initialized with tools: {[t.name for t in tools]}")
-    
     return llm_with_tools
 
 # Define the agent node
@@ -263,13 +663,14 @@ def agent_node(state: AgentState) -> dict:
     """Process the current state and generate a response"""
     messages = state["messages"]
     
-    logger.info(f"🧠 Agent node processing - Message count: {len(messages)}")
+    total_chars = sum(len(msg.content) for msg in messages)
+    approx_tokens = total_chars // 4
     
+    print(f"Approximate context usage: {approx_tokens} tokens")
+
     # Extract conversation history and last message
     chat_history = messages[:-1] if len(messages) > 1 else []
     last_message = messages[-1].content if messages else ""
-    
-    logger.info(f"📥 Input message: {last_message[:100]}..." if len(last_message) > 100 else f"📥 Input message: {last_message}")
     
     # Create chain with JARVIS prompt
     llm = create_llm()
@@ -284,11 +685,7 @@ def agent_node(state: AgentState) -> dict:
     
     # Log tool calls if any
     if hasattr(response, "tool_calls") and response.tool_calls:
-        logger.info(f"🔧 Tool calls detected: {[tc.get('name', 'unknown') for tc in response.tool_calls]}")
-        for tool_call in response.tool_calls:
-            logger.info(f"   Tool: {tool_call.get('name')} | Args: {tool_call.get('args')}")
-    else:
-        logger.info("💬 No tool calls - generating direct response")
+        print(f"🔧 Using tools: {', '.join([tc.get('name', 'unknown') for tc in response.tool_calls])}")
     
     # Return the new message to be added to state
     return {"messages": [response]}
@@ -301,12 +698,8 @@ def should_continue(state: AgentState) -> Literal["tools", "end"]:
     
     # If the LLM makes a tool call, route to tools
     if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-        logger.info(f"🔀 Routing to tools node - {len(last_message.tool_calls)} tool(s) to execute")
-        for tc in last_message.tool_calls:
-            logger.info(f"   Tool call: {tc}")
         return "tools"
     # Otherwise, end the flow
-    logger.info("🏁 No tools needed - ending flow")
     return "end"
 
 # Build the graph
@@ -337,8 +730,11 @@ workflow.add_conditional_edges(
 # Add edge from tools back to agent
 workflow.add_edge("tools", "agent")
 
-# Compile the graph
-app = workflow.compile()
+# Compile the graph with increased recursion limit
+app = workflow.compile(
+    checkpointer=None,
+    #recursion_limit=50  # Increased from default 25
+)
 
 # Interactive shell
 async def main():
@@ -393,26 +789,11 @@ async def main():
         state["messages"].append(HumanMessage(content=user_input))
         
         try:
-            logger.info("\n" + "="*60)
-            logger.info(f"🎯 Processing user request: {user_input}")
-            logger.info("="*60)
-            
             # Process through the graph
             result = await app.ainvoke(state)
             
             # Update state with full message history
             state = result
-            
-            # Log the complete message flow
-            logger.info(f"📊 Total messages in state: {len(result['messages'])}")
-            for i, msg in enumerate(result["messages"][-5:]):  # Show last 5 messages
-                msg_type = type(msg).__name__
-                if isinstance(msg, ToolMessage):
-                    logger.info(f"   {i+1}. {msg_type}: Tool response")
-                elif isinstance(msg, AIMessage) and hasattr(msg, "tool_calls") and msg.tool_calls:
-                    logger.info(f"   {i+1}. {msg_type}: With tool calls")
-                else:
-                    logger.info(f"   {i+1}. {msg_type}: Regular message")
             
             # Get the last AI message (excluding ones with only tool calls)
             ai_response = None
