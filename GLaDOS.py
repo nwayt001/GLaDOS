@@ -1,16 +1,25 @@
 import os
 import asyncio
 import requests
-from typing import TypedDict, Annotated, Sequence, List, Optional
+from typing import TypedDict, Annotated, Sequence, List, Optional, Literal
 from langchain_ollama import ChatOllama
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.tools import tool
+# We'll implement our own search instead of using the deprecated package
 from langgraph.graph import StateGraph, END
+from langgraph.prebuilt import ToolNode
 import operator
 import pygame
 import io
 import threading
 import logging
+import json
+from datetime import datetime
+import subprocess
+import shlex
+from pathlib import Path
+import re
 
 # Configuration
 OLLAMA_HOST = "http://10.0.0.108:11434"  # Replace with your Linux machine's IP
@@ -48,6 +57,332 @@ IMPORTANT: Every sentence should drip with GLaDOS's personality. Don't become a 
 
 # Initialize pygame for audio playback
 pygame.mixer.init(frequency=22050, size=-16, channels=2, buffer=512)
+
+@tool
+def get_weather(location: str) -> str:
+    """Get current weather and forecast for a location. Returns current conditions and next 2 days forecast."""
+    try:
+        # Use wttr.in which provides both current and forecast data for free
+        print(f"   🌤️ Checking weather for {location}...")
+        url = f"https://wttr.in/{location}?format=j1"
+        response = requests.get(url, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            
+            # Current weather
+            current = data['current_condition'][0]
+            temp_c = current['temp_C']
+            temp_f = current['temp_F']
+            feels_c = current['FeelsLikeC']
+            feels_f = current['FeelsLikeF']
+            description = current['weatherDesc'][0]['value']
+            humidity = current['humidity']
+            wind_mph = current['windspeedMiles']
+            wind_kph = current['windspeedKmph']
+            
+            result = [f"Current weather in {location}:"]
+            result.append(f"Temperature: {temp_f}°F ({temp_c}°C), feels like {feels_f}°F ({feels_c}°C)")
+            result.append(f"Conditions: {description}")
+            result.append(f"Humidity: {humidity}%, Wind: {wind_mph} mph ({wind_kph} km/h)")
+            
+            # Forecast for next 2 days
+            if 'weather' in data:
+                result.append("\nForecast:")
+                for i, day in enumerate(data['weather'][:3]):  # Today + next 2 days
+                    date = day['date']
+                    max_temp_f = day['maxtempF']
+                    max_temp_c = day['maxtempC']
+                    min_temp_f = day['mintempF']
+                    min_temp_c = day['mintempC']
+                    
+                    # Get hourly data for evening (around 6 PM)
+                    evening_desc = "No evening data"
+                    for hour in day['hourly']:
+                        if hour['time'] == '1800':  # 6 PM
+                            evening_desc = hour['weatherDesc'][0]['value']
+                            evening_temp_f = hour['tempF']
+                            evening_temp_c = hour['tempC']
+                            evening_desc = f"{evening_desc}, {evening_temp_f}°F ({evening_temp_c}°C)"
+                            break
+                    
+                    if i == 0:
+                        result.append(f"• Today ({date}): High {max_temp_f}°F ({max_temp_c}°C), Low {min_temp_f}°F ({min_temp_c}°C)")
+                        result.append(f"  Evening: {evening_desc}")
+                    elif i == 1:
+                        result.append(f"• Tomorrow ({date}): High {max_temp_f}°F ({max_temp_c}°C), Low {min_temp_f}°F ({min_temp_c}°C)")
+                        result.append(f"  Evening: {evening_desc}")
+                    else:
+                        day_name = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][
+                            datetime.strptime(date, "%Y-%m-%d").weekday()
+                        ]
+                        result.append(f"• {day_name} ({date}): High {max_temp_f}°F ({max_temp_c}°C), Low {min_temp_f}°F ({min_temp_c}°C)")
+            
+            return "\n".join(result)
+        else:
+            return f"I couldn't retrieve weather data for {location}. Please check the city name, Sir."
+            
+    except Exception as e:
+        return f"I apologise, Sir, but I encountered an error checking the weather: {str(e)}"
+
+@tool
+def execute_bash(command: str) -> str:
+    """Execute a bash command and return the output. Use with caution."""
+    print(f"   ⚡ Executing: {command}")
+    try:
+        # Safety check - warn about potentially dangerous commands
+        dangerous_patterns = ['rm -rf /', 'dd if=', 'mkfs', ':(){ :|:& };:']
+        if any(pattern in command.lower() for pattern in dangerous_patterns):
+            return "I must decline to execute this potentially dangerous command, Sir. Perhaps we should reconsider our approach."
+        
+        # Execute the command with timeout
+        result = subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            cwd=os.getcwd()
+        )
+        
+        output = result.stdout if result.stdout else result.stderr
+        if not output and result.returncode == 0:
+            output = "Command executed successfully with no output."
+        elif not output:
+            output = f"Command failed with return code {result.returncode}"
+            
+        # Truncate very long outputs
+        if len(output) > 2000:
+            output = output[:2000] + "\n... (output truncated)"
+            
+        return output
+    except subprocess.TimeoutExpired:
+        return "The command timed out after 30 seconds, Sir. It may still be running in the background."
+    except Exception as e:
+        return f"I encountered an error executing the command: {str(e)}"
+
+@tool
+def read_file(file_path: str) -> str:
+    """Read the contents of a file."""
+    print(f"   📖 Reading: {file_path}")
+    try:
+        path = Path(file_path).expanduser().resolve()
+        
+        # Safety check - don't read sensitive files
+        sensitive_patterns = ['.ssh/', '.aws/', '.env', 'password', 'secret', 'token', 'key']
+        if any(pattern in str(path).lower() for pattern in sensitive_patterns):
+            return "I must advise against reading potentially sensitive files, Sir. Security protocols prevent me from accessing this file."
+        
+        if not path.exists():
+            return f"The file {file_path} does not exist, Sir."
+        
+        if not path.is_file():
+            return f"{file_path} is not a file, Sir."
+        
+        # Check file size
+        file_size = path.stat().st_size
+        if file_size > 1_000_000:  # 1MB limit
+            return f"The file is quite large ({file_size:,} bytes), Sir. Perhaps we should use a different approach for such large files."
+        
+        with open(path, 'r', encoding='utf-8') as f:
+            content = f.read()
+            
+        # Truncate if still too long
+        if len(content) > 5000:
+            content = content[:5000] + "\n... (content truncated)"
+            
+        return content
+    except UnicodeDecodeError:
+        return "The file appears to be binary or uses an unsupported encoding, Sir."
+    except Exception as e:
+        return f"I encountered an error reading the file: {str(e)}"
+
+@tool
+def write_file(file_path: str, content: str) -> str:
+    """Write content to a file. Creates the file if it doesn't exist."""
+    print(f"   ✍️ Writing to: {file_path}")
+    try:
+        path = Path(file_path).expanduser().resolve()
+        
+        # Safety check - don't overwrite system files
+        system_dirs = ['/etc', '/usr', '/bin', '/sbin', '/boot', '/dev', '/proc', '/sys']
+        if any(str(path).startswith(d) for d in system_dirs):
+            return "I cannot modify system files, Sir. This would be inadvisable."
+        
+        # Create parent directories if they don't exist
+        path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Backup existing file if it exists
+        if path.exists():
+            backup_path = path.with_suffix(path.suffix + '.backup')
+            print(f"   💾 Creating backup: {backup_path}")
+            path.rename(backup_path)
+            
+        # Write the new content
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(content)
+            
+        return f"Successfully wrote {len(content)} characters to {file_path}, Sir."
+    except Exception as e:
+        return f"I encountered an error writing to the file: {str(e)}"
+
+@tool
+def list_directory(directory: str = ".") -> str:
+    """List contents of a directory."""
+    print(f"   📁 Listing: {directory}")
+    try:
+        path = Path(directory).expanduser().resolve()
+        
+        if not path.exists():
+            return f"The directory {directory} does not exist, Sir."
+        
+        if not path.is_dir():
+            return f"{directory} is not a directory, Sir."
+        
+        items = []
+        for item in sorted(path.iterdir()):
+            if item.is_dir():
+                items.append(f"📁 {item.name}/")
+            elif item.is_file():
+                size = item.stat().st_size
+                if size < 1024:
+                    size_str = f"{size}B"
+                elif size < 1024 * 1024:
+                    size_str = f"{size/1024:.1f}KB"
+                else:
+                    size_str = f"{size/(1024*1024):.1f}MB"
+                items.append(f"📄 {item.name} ({size_str})")
+        
+        if not items:
+            return "The directory is empty, Sir."
+        
+        return "\n".join(items[:50])  # Limit to 50 items
+    except Exception as e:
+        return f"I encountered an error listing the directory: {str(e)}"
+
+@tool
+def check_web_scraper_status() -> str:
+    """Check the status of the iOS app web scraper running on the Linux box."""
+    print(f"   🔍 Checking web scraper status on Linux box...")
+    
+    linux_host = "nicholas@10.0.0.108"
+    status_report = []
+    
+    try:
+        # Check if we can connect to the Linux box
+        print(f"   📡 Connecting to {linux_host}...")
+        ping_cmd = f"ssh -o ConnectTimeout=5 -o BatchMode=yes {linux_host} 'echo Connected'"
+        ping_result = subprocess.run(ping_cmd, shell=True, capture_output=True, text=True, timeout=10)
+        
+        if ping_result.returncode != 0:
+            return f"Cannot connect to the Linux box at {linux_host}. The system appears to be offline or SSH is not configured, Sir."
+        
+        # Check for the Red-Dot-Scraper process first
+        print(f"   🔎 Searching for Red-Dot-Scraper process...")
+        red_dot_cmd = f"ssh {linux_host} 'ps aux | grep \"Red-Dot-Scraper\" | grep -v grep'"
+        red_dot_result = subprocess.run(red_dot_cmd, shell=True, capture_output=True, text=True, timeout=10)
+        
+        processes_found = []
+        if red_dot_result.stdout.strip():
+            processes_found.append(("Red-Dot-Scraper", red_dot_result.stdout.strip()))
+        
+        # Also check for other common scraper process names
+        scraper_patterns = ["scraper", "scrapy", "crawler", "spider", "selenium", "puppeteer", "playwright"]
+        for pattern in scraper_patterns:
+            cmd = f"ssh {linux_host} 'ps aux | grep -i {pattern} | grep -v grep'"
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
+            if result.stdout.strip():
+                processes_found.append((pattern, result.stdout.strip()))
+        
+        if processes_found:
+            # Check if Red-Dot-Scraper specifically was found
+            red_dot_found = any(pattern == "Red-Dot-Scraper" for pattern, _ in processes_found)
+            if red_dot_found:
+                status_report.append("✅ Red-Dot-Scraper is running!")
+            else:
+                status_report.append("✅ Web scraper processes detected:")
+            
+            for pattern, process in processes_found:
+                # Parse process info for cleaner display
+                lines = process.split('\n')
+                for line in lines[:3]:  # Limit to first 3 matches per pattern
+                    parts = line.split()
+                    if len(parts) >= 11:
+                        user = parts[0]
+                        pid = parts[1]
+                        cpu = parts[2]
+                        mem = parts[3]
+                        cmd = ' '.join(parts[10:])[:100]  # Truncate long commands
+                        if pattern == "Red-Dot-Scraper":
+                            status_report.append(f"   • 🔴 PID {pid}: {cmd} (CPU: {cpu}%, MEM: {mem}%)")
+                        else:
+                            status_report.append(f"   • PID {pid}: {cmd} (CPU: {cpu}%, MEM: {mem}%)")
+        else:
+            status_report.append("⚠️ Red-Dot-Scraper is NOT running!")
+        
+        # Check for Docker containers that might be running scrapers
+        print(f"   🐳 Checking Docker containers...")
+        docker_cmd = f"ssh {linux_host} 'docker ps --format \"table {{{{.Names}}}}\\t{{{{.Status}}}}\\t{{{{.Ports}}}}\" 2>/dev/null | grep -E \"scraper|crawler|spider\" || true'"
+        docker_result = subprocess.run(docker_cmd, shell=True, capture_output=True, text=True, timeout=10)
+        
+        if docker_result.stdout.strip():
+            status_report.append("\n📦 Docker containers:")
+            status_report.append(docker_result.stdout.strip())
+        
+        # Check system resources
+        print(f"   💻 Checking system resources...")
+        resource_cmd = f"ssh {linux_host} 'echo \"=== System Resources ===\"; uptime; echo \"\"; free -h | head -2; echo \"\"; df -h / | tail -1'"
+        resource_result = subprocess.run(resource_cmd, shell=True, capture_output=True, text=True, timeout=10)
+        
+        if resource_result.stdout:
+            status_report.append("\n💻 System Status:")
+            for line in resource_result.stdout.split('\n'):
+                if 'load average' in line:
+                    # Extract load average
+                    load_part = line.split('load average:')[1].strip() if 'load average:' in line else ''
+                    status_report.append(f"   • Load Average: {load_part}")
+                elif 'Mem:' in line:
+                    # Parse memory info
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        status_report.append(f"   • Memory: {parts[1]} total, {parts[2]} used")
+                elif '/' in line and '%' in line:
+                    # Parse disk usage
+                    parts = line.split()
+                    if len(parts) >= 5:
+                        status_report.append(f"   • Disk Usage: {parts[4]} used")
+        
+        # Check for recent scraper logs
+        print(f"   📝 Checking for recent logs...")
+        log_locations = [
+            "/var/log/scraper.log",
+            "~/scraper/logs/scraper.log",
+            "~/logs/scraper.log",
+            "/home/nicholas/scraper.log"
+        ]
+        
+        for log_path in log_locations:
+            log_cmd = f"ssh {linux_host} 'if [ -f {log_path} ]; then echo \"Found: {log_path}\"; tail -n 5 {log_path}; fi'"
+            log_result = subprocess.run(log_cmd, shell=True, capture_output=True, text=True, timeout=10)
+            if log_result.stdout.strip():
+                status_report.append(f"\n📋 Recent log entries from {log_path}:")
+                status_report.append(log_result.stdout.strip()[:500])  # Limit log output
+                break
+        
+        if not status_report:
+            status_report.append("No specific scraper information found. You may need to check the specific service or process name, Sir.")
+        
+        return "\n".join(status_report)
+        
+    except subprocess.TimeoutExpired:
+        return "The connection to the Linux box timed out, Sir. The system may be under heavy load or experiencing network issues."
+    except Exception as e:
+        return f"I encountered an error checking the scraper status: {str(e)}"
+
+# Collect all tools
+tools = [web_search, get_weather, execute_bash, read_file, write_file, list_directory, check_web_scraper_status]
+
+
 
 # Define the state for our graph
 class AgentState(TypedDict):
